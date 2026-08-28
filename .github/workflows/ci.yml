@@ -1,0 +1,197 @@
+# Builds, tests and publishes the library.
+#
+# Three jobs, separate because they fail for different reasons and at different
+# speeds:
+#
+#   test     the one that catches a regression
+#   targets  the one that catches code that compiles on the JVM and nowhere else
+#   publish  uploads to GitHub Packages, for a release only
+#
+# There is no documentation job. Dokka runs inside `test`, where it is a gate
+# rather than an artifact: `failOnWarning` is on, so a `[Link]` to a symbol that
+# no longer exists fails the build, and that is a class of defect nothing else
+# here can see.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Publish this version to GitHub Packages (e.g. 0.1.0). Leave blank to
+          run the checks only. Use this to cut a release from a branch, where
+          `GITHUB_REF_NAME` is a branch name and the build refuses it.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# A superseded pull request run is cancelled; a superseded push is not. The last
+# push to land should be the one that ends up published, and cancelling a publish
+# in flight can leave a newer build racing an older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The Android SDK is preinstalled on the runner and Gradle finds it
+      # through ANDROID_HOME. `local.properties` is a developer file and is
+      # gitignored, so nothing here may rely on it.
+      - name: Check the Android SDK is present
+        run: test -d "${ANDROID_HOME:?ANDROID_HOME is unset}/platforms"
+
+      # `xvfb-run`, and it is not decoration.
+      #
+      # Half of `AwtRichClipboardTest` only does its work when a display exists:
+      # headless, it asserts that the library reports `available = false` and
+      # throws `ClipboardUnavailableException` cleanly; with a display, it round
+      # trips text and HTML through the *actual X11 selection*. That second half
+      # is the only test in the repository that proves a transferable is
+      # accepted by something other than the code that built it, and a runner
+      # without a display would skip it and still go green.
+      #
+      # `capabilities agree with the environment` is the assertion that stops
+      # that being silent: it fails if the display went missing.
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Test
+        run: |
+          xvfb-run -a ./gradlew --no-daemon \
+            :clipboard:jvmTest \
+            :clipboard:checkDependencyBudget
+
+      # A gate, not an artifact — see the note at the top of this file.
+      - name: Check the API reference
+        run: ./gradlew --no-daemon :clipboard:dokkaGenerateHtml
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: clipboard/build/reports/tests/
+          if-no-files-found: ignore
+
+  targets:
+    name: Compile every target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Konan pulls a compiler and a platform klib set per target and neither is
+      # in the Gradle cache, so without this the iOS compile re-downloads
+      # hundreds of megabytes on every run — which is most of this job's time.
+      - name: Cache Kotlin/Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      - name: Cache the Kotlin/JS toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/nodejs
+            ~/.gradle/yarn
+            ~/.gradle/binaryen
+          key: kotlin-js-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: kotlin-js-${{ runner.os }}-
+
+      # The whole point of this job. Four of the five platform bridges cannot be
+      # unit-tested on a Linux runner, so compiling every one of them is the
+      # gate that stops a `UIPasteboard` binding name or a `js(…)` body being
+      # wrong for months. The demo is built too, because it is the only caller
+      # that exercises the whole public API and a signature change that breaks
+      # it should fail here rather than the next time somebody runs it.
+      #
+      # iOS compiles to a klib here; linking a framework and running a simulator
+      # needs macOS, which is a slower job than this gate should be.
+      - name: Compile
+        run: |
+          ./gradlew --no-daemon \
+            :clipboard:compileKotlinJs \
+            :clipboard:compileKotlinWasmJs \
+            :clipboard:compileKotlinIosArm64 \
+            :clipboard:assemble \
+            :demo:compileKotlinIosArm64 \
+            :showcase:web:compileKotlinWasmJs \
+            :showcase:desktop:compileKotlinJvm \
+            :showcase:android:assembleDebug
+
+  publish:
+    name: Publish
+    # Only a release. A tag push is not a pull request merge, so `test` and
+    # `targets` always run first.
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
+    needs: [test, targets]
+    # Ubuntu, not macOS. Kotlin 2.x cross-compiles Apple *klibs*, which is
+    # exactly what a library consumer resolves. What still needs Xcode is
+    # linking a framework, and that happens in the consuming app.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache Kotlin/Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      # Say what is about to be uploaded before uploading it. The version comes
+      # from three sources with a precedence between them, and a package
+      # registry has no undo.
+      - name: Show the coordinate
+        run: |
+          ./gradlew --no-daemon --quiet \
+            ${{ inputs.version && format('-Pclipboard.version={0}', inputs.version) || '' }} \
+            :clipboard:coordinate
+
+      # On a tag this takes no version argument and so cannot disagree with the
+      # tag: the build reads `GITHUB_REF_TYPE`/`GITHUB_REF_NAME` itself.
+      - name: Publish to GitHub Packages
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./gradlew --no-daemon \
+            ${{ inputs.version && format('-Pclipboard.version={0}', inputs.version) || '' }} \
+            publishAllPublicationsToGitHubPackagesRepository

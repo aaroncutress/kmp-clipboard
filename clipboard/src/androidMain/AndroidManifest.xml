@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The file provider that makes copying an image work with no setup.
+
+  Android's clipboard cannot hold bytes. It holds a `content://` URI, and the
+  application pasting resolves it against whichever provider serves that
+  authority — so an image copy needs a provider on *this* side of the transfer,
+  in the app doing the copying. Every app that copies images has one; this saves
+  every consumer of this library from writing it again.
+
+  `${applicationId}` is substituted by the manifest merger with the consuming
+  app's own id, so two apps that both use this library do not collide on an
+  authority, and neither collides with a provider the app already has.
+
+  `exported="false"` with `grantUriPermissions="true"` is the pair that matters:
+  nothing may query this provider on its own, and the system grants read access
+  to whichever application receives the clip. That grant is made by the
+  clipboard service itself for URIs in the primary clip; the library does not
+  hand out permissions.
+
+  To turn this off — an app with its own FileProvider, or one whose policy
+  forbids an extra component — remove it with a merger rule and pass your own
+  authority to `AndroidRichClipboard`:
+
+      <provider
+          android:name="io.github.aaroncutress.clipboard.ClipboardFileProvider"
+          android:authorities="${applicationId}.kmpclipboard"
+          tools:node="remove" />
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="io.github.aaroncutress.clipboard.ClipboardFileProvider"
+            android:authorities="${applicationId}.kmpclipboard"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/kmp_clipboard_paths" />
+        </provider>
+    </application>
+
+</manifest>

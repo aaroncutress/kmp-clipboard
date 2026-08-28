@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What `ClipboardFileProvider` will serve: one directory inside the app's cache,
+  and nothing else.
+
+  The cache rather than files/ because these are copies whose only purpose is to
+  survive until someone pastes them — the system may delete them when it needs
+  space, and losing one costs a paste rather than data. `kmp-clipboard/` rather
+  than the whole cache because a provider that serves an app's entire cache
+  directory is a provider that will eventually serve something it should not.
+-->
+<paths>
+    <cache-path name="kmp-clipboard" path="kmp-clipboard/" />
+</paths>
