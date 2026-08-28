@@ -1,16 +1,17 @@
-# Builds, tests and publishes the library.
+# Builds, tests, publishes the library, and deploys the demo.
 #
-# Three jobs, separate because they fail for different reasons and at different
+# Six jobs, separate because they fail for different reasons and at different
 # speeds:
 #
+#   guard    decides whether this commit has to re-prove something already proven
 #   test     the one that catches a regression
 #   targets  the one that catches code that compiles on the JVM and nowhere else
-#   publish  uploads to GitHub Packages, for a release only
+#   site     the demo bundle and the API reference — the slowest thing here
+#   deploy   puts the site on GitHub Pages
+#   publish  uploads the library to GitHub Packages, for a release only
 #
-# There is no documentation job. Dokka runs inside `test`, where it is a gate
-# rather than an artifact: `failOnWarning` is on, so a `[Link]` to a symbol that
-# no longer exists fails the build, and that is a class of defect nothing else
-# here can see.
+# `deploy` needs only `site`, deliberately: a library regression should not take
+# the demo offline, and a broken page should not block a release.
 
 name: CI
 
@@ -33,25 +34,107 @@ permissions:
   contents: read
 
 # A superseded pull request run is cancelled; a superseded push is not. The last
-# push to land should be the one that ends up published, and cancelling a publish
+# push to land should be the one that ends up published, and cancelling a deploy
 # in flight can leave a newer build racing an older one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Has this exact tree already passed?
+  #
+  # Two cases, and the first is the one people hit:
+  #
+  # **Tagging a commit that is already green.** `git tag v0.2.0` on a main commit
+  # that CI has already built produces a run whose SHA is that same commit. There
+  # is nothing new to test, so `test` and `targets` are skipped and the run goes
+  # straight to publishing.
+  #
+  # **Merging a pull request.** The merge produces a commit whose *tree* is
+  # byte-for-byte the branch head's, whenever main has not moved underneath it —
+  # true of a merge commit, a squash and a rebase alike. So the work `test` would
+  # do on main has already been done, on the same bytes, minutes earlier.
+  #
+  # This is the property a merge queue gives you, arrived at from the other
+  # direction: rather than testing the merge result before it lands, notice
+  # afterwards that the result is identical to something already tested.
+  #
+  # Every path out of here that cannot *prove* the trees match settles on
+  # `false` and runs everything: a direct push, a conflicted merge, main having
+  # moved, a missing run, a failed API call.
+  #
+  # One thing worth knowing about the first case: the run it finds may itself
+  # have been settled by the second. That chain is still sound, because it always
+  # bottoms out in a run that really did the work on the same tree — but it does
+  # mean a tag pushed *before* main's run finishes will not find a success and
+  # will rebuild. Wait for green, then tag.
+  guard:
+    name: Decide what to re-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      settled: ${{ steps.decide.outputs.settled }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -uo pipefail
+
+          settle() {
+            echo "settled=$1" >> "$GITHUB_OUTPUT"
+            echo "$2"
+            echo "$2" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          [ "$EVENT" = push ] || settle false "A $EVENT event proves nothing. Running everything."
+
+          # Case 1: this exact commit already has a green run. Covers the tag.
+          passed=$(gh api \
+            "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&status=success" \
+            --jq '.workflow_runs | length' 2>/dev/null)
+          if [ "${passed:-0}" -gt 0 ]; then
+            settle true "${SHA:0:7} has already passed CI. Skipping the checks."
+          fi
+
+          # Case 2: a pull request merge whose tree is what landed.
+          [ "$REF" = refs/heads/main ] ||
+            settle false "$REF is not main and has no green run of its own. Running everything."
+
+          head=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].head.sha' 2>/dev/null)
+          [ -n "${head:-}" ] && [ "$head" != null ] ||
+            settle false "No pull request produced $SHA. Running everything."
+
+          landed=$(gh api "repos/$REPO/git/commits/$SHA" --jq .tree.sha 2>/dev/null) ||
+            settle false "Could not read the tree of $SHA. Running everything."
+          reviewed=$(gh api "repos/$REPO/git/commits/$head" --jq .tree.sha 2>/dev/null) ||
+            settle false "Could not read the tree of $head. Running everything."
+          [ "$landed" = "$reviewed" ] ||
+            settle false "main's tree is $landed and ${head:0:7}'s is $reviewed — main moved under it. Running everything."
+
+          passed=$(gh api \
+            "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$head&status=success" \
+            --jq '.workflow_runs | length' 2>/dev/null)
+          [ "${passed:-0}" -gt 0 ] ||
+            settle false "No successful CI run for ${head:0:7}. Running everything."
+
+          settle true "${head:0:7} passed CI and its tree is exactly what landed ($landed). Skipping the checks."
+
   test:
     name: Test
+    needs: guard
+    if: ${{ !cancelled() && needs.guard.outputs.settled != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: ./.github/actions/setup
 
       # The Android SDK is preinstalled on the runner and Gradle finds it
       # through ANDROID_HOME. `local.properties` is a developer file and is
@@ -61,16 +144,14 @@ jobs:
 
       # `xvfb-run`, and it is not decoration.
       #
-      # Half of `AwtRichClipboardTest` only does its work when a display exists:
-      # headless, it asserts that the library reports `available = false` and
-      # throws `ClipboardUnavailableException` cleanly; with a display, it round
-      # trips text and HTML through the *actual X11 selection*. That second half
-      # is the only test in the repository that proves a transferable is
-      # accepted by something other than the code that built it, and a runner
-      # without a display would skip it and still go green.
-      #
-      # `capabilities agree with the environment` is the assertion that stops
-      # that being silent: it fails if the display went missing.
+      # Half of `AwtRichClipboardTest` only does its work when a display exists.
+      # Headless it asserts that the library reports `available = false` and
+      # throws cleanly; with a display it round trips text and HTML through the
+      # *actual X11 selection*, which is the only test in the repository that
+      # proves a transferable is accepted by something other than the code that
+      # built it. A runner without a display would skip that half and still go
+      # green — `capabilities agree with the environment` is the assertion that
+      # stops it being silent.
       - name: Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
@@ -79,10 +160,6 @@ jobs:
           xvfb-run -a ./gradlew --no-daemon \
             :clipboard:jvmTest \
             :clipboard:checkDependencyBudget
-
-      # A gate, not an artifact — see the note at the top of this file.
-      - name: Check the API reference
-        run: ./gradlew --no-daemon :clipboard:dokkaGenerateHtml
 
       - name: Upload test reports
         if: failure()
@@ -94,43 +171,18 @@ jobs:
 
   targets:
     name: Compile every target
+    needs: guard
+    if: ${{ !cancelled() && needs.guard.outputs.settled != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      # Konan pulls a compiler and a platform klib set per target and neither is
-      # in the Gradle cache, so without this the iOS compile re-downloads
-      # hundreds of megabytes on every run — which is most of this job's time.
-      - name: Cache Kotlin/Native
-        uses: actions/cache@v4
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
-          restore-keys: konan-${{ runner.os }}-
-
-      - name: Cache the Kotlin/JS toolchain
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/nodejs
-            ~/.gradle/yarn
-            ~/.gradle/binaryen
-          key: kotlin-js-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
-          restore-keys: kotlin-js-${{ runner.os }}-
+      - uses: ./.github/actions/setup
 
       # The whole point of this job. Four of the five platform bridges cannot be
-      # unit-tested on a Linux runner, so compiling every one of them is the
-      # gate that stops a `UIPasteboard` binding name or a `js(…)` body being
-      # wrong for months. The demo is built too, because it is the only caller
-      # that exercises the whole public API and a signature change that breaks
-      # it should fail here rather than the next time somebody runs it.
+      # unit-tested on a Linux runner, so compiling every one of them is the gate
+      # that stops a wrong `UIPasteboard` binding name or a malformed `js(…)`
+      # body sitting undiscovered for months. `:demo` is compiled too, because it
+      # is the only caller that exercises the whole public API.
       #
       # iOS compiles to a klib here; linking a framework and running a simulator
       # needs macOS, which is a slower job than this gate should be.
@@ -142,43 +194,108 @@ jobs:
             :clipboard:compileKotlinIosArm64 \
             :clipboard:assemble \
             :demo:compileKotlinIosArm64 \
-            :showcase:web:compileKotlinWasmJs \
             :showcase:desktop:compileKotlinJvm \
             :showcase:android:assembleDebug
 
+  # The demo, and the API reference it is served alongside.
+  #
+  # The slowest thing here — a Compose/Wasm bundle plus binaryen — and it runs on
+  # pull requests too. A site built only on main makes the deploy the first place
+  # it is ever compiled, so the first anyone hears of a broken page is after it
+  # has landed. The build runs everywhere; only the deploy is gated.
+  #
+  # Not run on tags: a tag deploys nothing, so building it would be several
+  # minutes spent on an artifact nobody collects.
+  site:
+    name: Build the site
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+
+      - name: Build the demo
+        run: ./gradlew --no-daemon :showcase:web:wasmJsBrowserDistribution
+
+      # A gate, not an artifact: `failOnWarning` is on, so a malformed `@param`
+      # or a `[Link]` to a symbol that no longer exists fails the build. That is
+      # a class of KDoc defect nothing else here can see.
+      - name: Build the API reference
+        run: ./gradlew --no-daemon :clipboard:dokkaGenerateHtml
+
+      # Demo at the root, reference under `/api/`. Laid out here rather than by a
+      # Gradle copy task, because this arrangement is a fact about the deployment
+      # and not about the build.
+      - name: Lay the site out
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          cp -r showcase/web/build/dist/wasmJs/productionExecutable/. site/
+          # The Wasm compiler emits a source map beside the binary whatever
+          # webpack is told, and `cp -r .` takes everything.
+          find site -name '*.map' -delete
+          mkdir -p site/api
+          cp -r clipboard/build/dokka/html/. site/api/
+          # Pages runs the whole tree through Jekyll unless told not to, and
+          # Jekyll drops files beginning with an underscore — which is most of
+          # what a webpack bundle emits.
+          touch site/.nojekyll
+
+          # Assertions, not decoration. A bundle that silently produced nothing
+          # would otherwise deploy as a blank page and look like a runtime bug.
+          test -f site/index.html
+          test -f site/showcase.js
+          test -f site/api/index.html
+          find site -maxdepth 1 -name '*.wasm' | grep -q . ||
+            { echo "no .wasm in the distribution — the bundle layout changed" >&2; exit 1; }
+
+          echo "::group::Distribution contents"
+          find site -maxdepth 1 -type f -printf '%10s  %P\n' | sort -k2
+          echo "::endgroup::"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy
+    needs: site
+    # A pull request builds the site to prove it still builds; it does not
+    # replace what is published.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
   publish:
     name: Publish
-    # Only a release. A tag push is not a pull request merge, so `test` and
-    # `targets` always run first.
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
-    needs: [test, targets]
-    # Ubuntu, not macOS. Kotlin 2.x cross-compiles Apple *klibs*, which is
-    # exactly what a library consumer resolves. What still needs Xcode is
-    # linking a framework, and that happens in the consuming app.
+    needs: [guard, test, targets]
+    # `!failure() && !cancelled()` rather than `success()`: when `guard` settles,
+    # `test` and `targets` are *skipped*, and a skipped dependency is not a
+    # failure. Plain `needs` would skip this job along with them, which would
+    # make the whole guard pointless for the case it exists for.
+    if: >-
+      ${{ !failure() && !cancelled() &&
+      (startsWith(github.ref, 'refs/tags/v') || inputs.version != '') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      - name: Cache Kotlin/Native
-        uses: actions/cache@v4
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
-          restore-keys: konan-${{ runner.os }}-
+      - uses: ./.github/actions/setup
 
       # Say what is about to be uploaded before uploading it. The version comes
-      # from three sources with a precedence between them, and a package
-      # registry has no undo.
+      # from three sources with a precedence between them, and a package registry
+      # has no undo.
       - name: Show the coordinate
         run: |
           ./gradlew --no-daemon --quiet \

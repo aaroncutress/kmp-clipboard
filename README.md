@@ -4,6 +4,10 @@ A **rich clipboard** for Compose Multiplatform. Text, formatted text, images,
 files and arbitrary formats — on Android, iOS, desktop and web, behind one
 composition local that needs no setup.
 
+**[Try the demo](https://aaroncutress.github.io/kmp-clipboard/)** ·
+[documentation](docs/README.md) ·
+[API reference](https://aaroncutress.github.io/kmp-clipboard/api/)
+
 ```kotlin
 val clipboard = LocalRichClipboard.current
 val scope = rememberCoroutineScope()
@@ -31,36 +35,15 @@ This is those four, written once.
 ## Installing
 
 ```kotlin
-// build.gradle.kts
 implementation("io.github.aaroncutress:kmp-clipboard:0.1.0")
 ```
 
-Built against Compose Multiplatform **1.12.0** and Kotlin **2.4.10**.
+Compose Multiplatform **1.12.0**, Kotlin **2.4.10**.
 
-## Using it
+## A taste
 
-### The one-liners
-
-Most code needs nothing else. Every one of these is an extension over the three
-members of `RichClipboard`, and every one is `suspend` — a clipboard read is
-cross-process on Android, a permission-gated promise on the web, and a blocking
-X11 round trip on Linux.
-
-```kotlin
-clipboard.setText("hello");            clipboard.getText()
-clipboard.setHtml("<b>hi</b>");        clipboard.getHtml()
-clipboard.setAnnotatedString(styled);  clipboard.getAnnotatedString()
-clipboard.setImage(bitmap);            clipboard.getImage()
-clipboard.setUri("https://…");         clipboard.getUris()
-clipboard.setFiles(files);             clipboard.getFiles()
-clipboard.clear()
-clipboard.hasText(); clipboard.hasImage(); clipboard.hasFiles()
-```
-
-### One payload, several representations
-
-That is what a clipboard item actually is, and it is the reason this library
-exists rather than a `setText`/`getText` pair:
+One payload, several representations — which is what a clipboard item actually
+is, and the reason this exists rather than a `setText`/`getText` pair:
 
 ```kotlin
 clipboard.write(label = "Invoice total") {
@@ -70,54 +53,26 @@ clipboard.write(label = "Invoice total") {
 }
 ```
 
-An application pasting into a plain-text field gets the text, one pasting into a
-document gets the HTML, an image editor gets the PNG, and your own app gets its
-own format back exactly as it wrote it. None of them has to know about the
-others.
+A plain-text field gets the text, a word processor gets the markup, an image
+editor gets the PNG, and your own app gets its own structured data back exactly
+as it wrote it.
 
-`bytes(format) { … }` takes a **producer**, not a `ByteArray`. Encoding is
-deferred until something asks — and on the web it is the only shape that works
-outside a user gesture, because Safari accepts a `ClipboardItem` whose values are
-promises and rejects one built from resolved blobs once the gesture has ended.
-
-### Asking without reading
+Asking what is there, without reading it — which on Android is the difference
+between a paste button and a "this app pasted from your clipboard" toast:
 
 ```kotlin
 val info by rememberClipInfo()
 IconButton(onClick = ::paste, enabled = info?.hasImage == true) { Icon(Paste) }
 ```
 
-`peek()` and everything built on it read only the clipboard's *description*. On
-Android that is the difference between a paste button and a "this app pasted
-from your clipboard" toast every time the window regains focus.
+Null from a read means *nothing there*. A refusal throws, because on the web the
+difference between "empty" and "the browser wants a user gesture" is a
+five-minute problem that becomes an afternoon if the API will not say which.
 
-### Zero setup, and how
+## What each platform can do
 
-```kotlin
-val clipboard = LocalRichClipboard.current   // no provider, no init call
-```
-
-`LocalRichClipboard` is a
-[`compositionLocalWithComputedDefaultOf`](https://developer.android.com/reference/kotlin/androidx/compose/runtime/package-summary#compositionLocalWithComputedDefaultOf(kotlin.Function1)),
-whose default is computed *inside* composition and can therefore read
-`LocalContext` — which is how the Android implementation finds a `Context`
-without one being passed in. A plain `staticCompositionLocalOf` cannot do that,
-and the usual ways around it are both worse: an `error("wrap your app in …")`
-default makes every consumer install a provider to use the library at all, and a
-`ContentProvider` auto-initialiser puts a component in everybody's manifest for
-something composition already knows.
-
-Provide over it for a test, or for an Android app with its own file provider:
-
-```kotlin
-CompositionLocalProvider(LocalRichClipboard provides InMemoryRichClipboard()) { PriceRow(price) }
-```
-
-### When it will not work
-
-The four platforms are not one clipboard with four spellings, and this library
-does not pretend otherwise. `RichClipboard.capabilities` says what this one can
-do, so a menu can grey an item out rather than offering it and apologising:
+`RichClipboard.capabilities` answers this in code, so a menu can grey an item out
+rather than offering it and apologising.
 
 | | Android | iOS | Desktop | Web |
 |---|---|---|---|---|
@@ -130,74 +85,20 @@ do, so a menu can grey an item out rather than offering it and apologising:
 | read without a gesture | yes | yes | yes | **no** |
 | observe changes | foreground | yes | best-effort | **no** |
 
-Null from a read means *nothing there*. A refusal **throws** —
-`ClipboardAccessDeniedException`, `ClipboardUnavailableException` — because on
-the web the difference between "empty" and "the browser said no, add a user
-gesture" is a five-minute problem that becomes an afternoon if the API lies
-about it.
+Details, and the native handle for everything a MIME-shaped abstraction leaves
+out, in [`docs/using/platforms.md`](docs/using/platforms.md).
 
-### Reaching the platform
+## Documentation
 
-Everything a MIME-shaped abstraction has to leave out is one property away:
+**Using it** — [getting started](docs/using/getting-started.md) ·
+[formats](docs/using/formats.md) ·
+[formatted text](docs/using/formatted-text.md) ·
+[platforms](docs/using/platforms.md) ·
+[Android's file provider](docs/using/android.md)
 
-```kotlin
-clipboard.androidClipboardManager   // android.content.ClipboardManager
-clipboard.uiPasteboard              // platform.UIKit.UIPasteboard
-clipboard.awtClipboard              // java.awt.datatransfer.Clipboard
-clipboard.w3cClipboard              // navigator.clipboard
-```
-
-## Android: the bundled file provider
-
-Android's clipboard cannot hold bytes. It holds a `content://` URI that the
-pasting application resolves — so copying an image needs a `ContentProvider` in
-the app doing the copying. This library ships one, merged into your manifest at
-`${applicationId}.kmpclipboard`, so `setImage` works with no setup.
-
-To turn it off — an app with its own `FileProvider`, or a policy against extra
-components — remove it and name your own authority:
-
-```xml
-<provider
-    android:name="io.github.aaroncutress.clipboard.ClipboardFileProvider"
-    android:authorities="${applicationId}.kmpclipboard"
-    tools:node="remove" />
-```
-
-```kotlin
-val clipboard = remember(context) { AndroidRichClipboard(context, authority = MY_AUTHORITY) }
-```
-
-Its paths file must serve a `kmp-clipboard` directory inside the app's cache;
-copy [`kmp_clipboard_paths.xml`](clipboard/src/androidMain/res/xml/kmp_clipboard_paths.xml).
-
-## Formatted text
-
-`setAnnotatedString` and `getAnnotatedString` convert between `AnnotatedString`
-and HTML in common code, because there is nothing to delegate to:
-`AnnotatedString.fromHtml` throws
-`UnsupportedOperationException("Compose Multiplatform doesn't support fromHtml")`
-on every target except Android — it is a thin wrapper over Android's
-`Html.fromHtml`.
-
-Weight, slant, underline, strikethrough, colour, background, absolute size and
-links survive in both directions. Paragraph alignment survives. `FontFamily` does
-not, deliberately: a Compose `FontFamily` can be a bundled resource with no name
-a stylesheet could refer to, and writing `font-family:sans-serif` for it would be
-inventing information.
-
-The parser is tolerant on purpose — unknown tags are dropped and **their text is
-kept** — because clipboard HTML is whatever the source application felt like
-emitting. Word writes `<o:p>`; Google Docs writes `<span style="font-weight:700">`
-rather than `<b>`, and `color:rgb(0,0,0)` rather than hex. Both are handled.
-
-> Related: [HtmlConverterCompose](https://github.com/cbeyls/HtmlConverterCompose)
-> is a good multiplatform HTML→`AnnotatedString` converter and was considered for
-> this. It reads only `color` and `background-color` from inline CSS, skips
-> `<table>` and its contents, and does not go the other way — and a clipboard
-> needs `font-weight`/`font-style`/`font-size` from inline CSS (that is how Docs
-> and Word emit them), tables (people copy them constantly), and the HTML
-> direction for writing. Different target, so this library carries its own.
+**Building it** — [contributing](docs/building/contributing.md) ·
+[testing](docs/building/testing.md) ·
+[releasing](docs/building/releasing.md)
 
 ## Running the demo
 
@@ -218,41 +119,24 @@ That is what proves the bundled file provider merged into your manifest.
 ## Building
 
 ```sh
-./gradlew :clipboard:jvmTest :clipboard:checkDependencyBudget :clipboard:dokkaGenerateHtml
+xvfb-run -a ./gradlew :clipboard:jvmTest :clipboard:checkDependencyBudget
+./gradlew :clipboard:dokkaGenerateHtml
 ./gradlew :clipboard:compileKotlinJs :clipboard:compileKotlinWasmJs \
           :clipboard:compileKotlinIosArm64 :clipboard:assemble
 ```
 
-`jvmTest` covers the clip model, the HTML conversion in both directions, the
-Skia image codec that three of the five targets share, and a real round trip
-through `java.awt.datatransfer`. Run it under `xvfb-run` and it additionally
-exercises the actual X11 system clipboard:
-
-```sh
-xvfb-run -a ./gradlew :clipboard:jvmTest
-```
-
-`checkDependencyBudget` walks the resolved runtime graph and fails if Compose
-Foundation or Material reaches the library. It draws nothing and has no business
-depending on anything that does.
+`xvfb-run` is not decoration: half the desktop suite only exercises the real X11
+clipboard when a display exists. [`testing.md`](docs/building/testing.md) has
+what each gate asks and what each has caught.
 
 ## Releasing
-
-A release is a tag:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-CI publishes `io.github.aaroncutress:kmp-clipboard:0.2.0` to GitHub Packages. For
-Maven Central, `./gradlew :clipboard:centralBundle` produces the zip that
-[Central Portal](https://central.sonatype.com/publishing) takes; signing is on
-whenever `SIGNING_KEY` is set and off otherwise, so a local publish needs no GPG
-key.
-
-```sh
-./gradlew :clipboard:coordinate   # what this build would publish as
-```
+Tagging a commit that already passed CI does not rebuild it. See
+[`releasing.md`](docs/building/releasing.md).
 
 ## Licence
 
