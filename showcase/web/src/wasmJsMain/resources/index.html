@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>kmp-clipboard</title>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+<!--
+  `ComposeViewport(document.body)` fills the body, so there is no canvas element
+  to declare here.
+
+  Worth knowing while testing: the Clipboard API needs a secure context, so this
+  page works on https and on localhost and nowhere else. `wasmJsBrowserRun`
+  serves it on localhost, which is why that is the way to try it.
+-->
+<script src="showcase.js"></script>
+</body>
+</html>

@@ -1,0 +1,75 @@
+[versions]
+# Core build and tooling. Deliberately the same Kotlin, AGP, Gradle and Dokka as
+# `kontour-labs/ui`, so the two libraries can be built by one toolchain and used
+# in one app.
+agp = "9.3.1"
+kotlin = "2.4.10"
+# 1.12.0 *stable*, not the `-rc01` Kontour UI currently pins. The RC was cut
+# because `ImageComposeScene.calculateContentSize()` landed there; stable
+# shipped on 2026-08-25 and carries the same API, so there is no reason for a
+# new repository to start on a release candidate.
+composeMultiplatform = "1.12.0"
+dokka = "2.1.0"
+# Material 3 for Compose Multiplatform is versioned independently of the plugin
+# and has no stable release at 1.12 — the newest stable is 1.9.0, which is built
+# against a compose-ui three releases older than the one here. The demo is not
+# published and mixing Material 3 with a mismatched compose-ui is the more likely
+# way to break, so it tracks the alpha that is aligned with 1.12.0. Nothing in
+# `:clipboard` depends on it; `checkDependencyBudget` fails the build if it ever
+# does.
+composeMaterial3 = "1.12.0-alpha03"
+
+# Android
+# minSdk 24 rather than Kontour UI's 29. Nothing here needs more: `FileProvider`
+# is a support-library class, `ClipDescription.hasMimeType` has been there since
+# API 11, and the one API-gated call — `clearPrimaryClip`, API 28 — is already
+# behind a version check because it has to be.
+android-compileSdk = "37"
+android-minSdk = "24"
+android-targetSdk = "37"
+androidx-activity = "1.13.0"
+# `FileProvider`, and nothing else. See `ClipboardFileProvider`.
+androidx-core = "1.19.0"
+
+# KotlinX
+kotlinx-coroutines = "1.11.0"
+kotlinx-browser = "0.5.0"
+
+# Skia, for the image codec on every target that is not Android. Compose already
+# brings it transitively; it is pinned here so the version this library compiles
+# against is a decision rather than a consequence. This is the version
+# `org.jetbrains.compose.ui:ui-graphics-desktop:1.12.0` resolves to.
+skiko = "0.150.1"
+
+[libraries]
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
+kotlinx-browser = { module = "org.jetbrains.kotlinx:kotlinx-browser", version.ref = "kotlinx-browser" }
+
+# Compose runtime and ui, and nothing above them. Foundation and Material are
+# both absent on purpose — a clipboard draws nothing — and
+# `:clipboard:checkDependencyBudget` fails the build if either arrives
+# transitively.
+compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "composeMultiplatform" }
+compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "composeMultiplatform" }
+compose-uiTest = { module = "org.jetbrains.compose.ui:ui-test", version.ref = "composeMultiplatform" }
+
+# The demo only — see the note on `composeMaterial3` above.
+compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "composeMultiplatform" }
+compose-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "composeMaterial3" }
+
+
+skiko = { module = "org.jetbrains.skiko:skiko", version.ref = "skiko" }
+
+androidx-core = { module = "androidx.core:core", version.ref = "androidx-core" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidx-activity" }
+
+[plugins]
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
+composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+androidApplication = { id = "com.android.application", version.ref = "agp" }
+androidMultiplatformLibrary = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+dokka = { id = "org.jetbrains.dokka", version.ref = "dokka" }

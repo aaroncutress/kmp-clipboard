@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Note what is *not* here: no `<provider>`.
+
+  The file provider that makes copying an image work is contributed by the
+  library's own manifest and merged into this one, which is the whole point of
+  bundling it. `./gradlew :showcase:android:installDebug`, copy an image, paste
+  it into Gmail — if that works, the merge worked.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:label="kmp-clipboard"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
