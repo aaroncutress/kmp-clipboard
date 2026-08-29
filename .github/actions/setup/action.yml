@@ -1,0 +1,47 @@
+name: Set up the build
+description: >-
+  Java, Gradle and the two caches Gradle's own does not cover. Factored out
+  because four jobs need the identical thing and three of them were drifting.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    # Caches ~/.gradle — the dependency cache and the build cache both. By
+    # default it only *writes* the cache from the default branch and reads it
+    # everywhere else, which is what stops a pull request poisoning main's.
+    #
+    # The build cache is the one that makes a re-run cheap: `org.gradle.caching`
+    # is on in gradle.properties, so a task whose inputs have not changed is
+    # fetched rather than executed even across runners.
+    - uses: gradle/actions/setup-gradle@v4
+
+    # Konan pulls a compiler and a platform klib set per Apple target, and
+    # neither is in the Gradle cache. Without this, the iOS compile re-downloads
+    # hundreds of megabytes on every run — which is most of that job's time.
+    #
+    # Keyed on the version catalogue because that is what decides which compiler
+    # gets fetched; there is no lockfile to key on.
+    - uses: actions/cache@v4
+      with:
+        path: ~/.konan
+        key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+        restore-keys: konan-${{ runner.os }}-
+
+    # Node, yarn, binaryen and the npm tooling Kotlin sets up for a browser
+    # target, all fetched from outside GitHub on a cold run. `kotlin-npm-tooling`
+    # is the one that holds webpack, and it is a separate directory from the
+    # rest, which is easy to miss.
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/nodejs
+          ~/.gradle/yarn
+          ~/.gradle/binaryen
+          ~/.kotlin/kotlin-npm-tooling
+        key: kotlin-js-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+        restore-keys: kotlin-js-${{ runner.os }}-
